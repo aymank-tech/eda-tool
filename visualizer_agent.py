@@ -211,7 +211,7 @@ def _scatter_insights(df, col_x, col_y, r_val, hue_col):
 def _correlation_insights(df, numeric_cols):
     """Analyze the correlation matrix and return data-driven insight text."""
     corr = df[numeric_cols].corr()
-    corr_abs = corr.abs()
+    corr_abs = corr.abs().copy()
     np.fill_diagonal(corr_abs.values, 0)
 
     parts = []
@@ -237,7 +237,7 @@ def _correlation_insights(df, numeric_cols):
         parts.extend(pairs)
 
     # Check for features with weak correlations to everything
-    max_corr_per_col = corr.abs()
+    max_corr_per_col = corr.abs().copy()
     np.fill_diagonal(max_corr_per_col.values, 0)
     weak_cols = [col for col in numeric_cols if max_corr_per_col[col].max() < 0.2]
     if weak_cols:
@@ -381,7 +381,7 @@ def generate_visualizations(df):
 
     # 2. Scatter plot of the two most correlated numeric features
     if len(numeric_cols) >= 2:
-        corr = df[numeric_cols].corr().abs()
+        corr = df[numeric_cols].corr().abs().copy()
         np.fill_diagonal(corr.values, 0)
         max_pair = corr.stack().idxmax()
         col_x, col_y = max_pair
