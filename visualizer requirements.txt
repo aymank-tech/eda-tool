@@ -1,0 +1,31 @@
+I want to build a tool for exploratory data analysis (EDA); the is the initial phase in data science.
+
+The tool should have two agents: 
+
+The Visualizer Agent:
+	•	The Visualizer performs EDA for the palmerpenguins dataset (https://allisonhorst.github.io/palmerpenguins/).
+	•	The goal of the Visualizer is to investigate the dataset, uncover structure, detect anomalies, and test assumptions. It helps determine appropriate modeling techniques and reveals patterns before formal analysis.
+	•	The Visualizer should provide two kinds of outcomes: 
+	◦	Statistical summaries
+	◦	Visualizations (e.g., histograms, scatter plots) 
+	•	The Visualizer should provide three or more visualizations for the dataset
+
+The Critic Agent: 
+
+	•	The Critic Agent judges the outcomes of the Visualizer according to the following rubric:
+
+
+| Dimension     | Needs Work                              | Solid                                 | Excellent                                        |
+|---------------|-----------------------------------------|---------------------------------------|--------------------------------------------------|
+|Clarity        |Hard to read/interpret                   |Readable with minor effort             |Immediately clear                                 |
+|Insight Depth  |Surface stats only.                      |At least one non-obvious finding       |Multiple meaningful insights                      |
+|Completeness   |Major gaps in coverage                   |Distributions and relationships covered|Shape, outliers, and missingness are all addressed|
+|Aesthetics     |Cluttered or default styling.            |Clean with proper labels               |Polished and consistent                           |
+
+
+The tool should have a button to run the Visualizer and display its results, and another button to run the Critic and display its results. 
+
+The tool should run on a local browser. 
+
+
+
