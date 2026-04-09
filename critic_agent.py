@@ -1,4 +1,7 @@
-"""Critic Agent — evaluates the Visualizer Agent's EDA output against a rubric."""
+"""Critic Agent — uses ChatGPT to evaluate the Visualizer Agent's EDA output against a rubric."""
+
+import json
+from openai import OpenAI
 
 RUBRIC = {
     "Clarity": {
@@ -23,144 +26,203 @@ RUBRIC = {
     },
 }
 
+SYSTEM_PROMPT = """\
+You are an expert data visualization critic. You evaluate exploratory data analysis (EDA) \
+visualizations against a structured rubric.
 
-def _evaluate_clarity(summary, visualizations):
-    score = "Solid"
-    reasons = []
+## Rubric
 
-    all_have_titles = all(v[0] for v in visualizations)
-    all_have_descriptions = all(v[2] for v in visualizations)
+Each visualization must be scored on these four dimensions. The only valid scores are \
+"Excellent", "Solid", or "Needs Work".
 
-    if all_have_titles and all_have_descriptions:
-        reasons.append("All visualizations have clear titles and written interpretations.")
-        score = "Excellent"
-    elif all_have_titles:
-        reasons.append("All visualizations have titles but some lack descriptions.")
-        score = "Solid"
+| Dimension | Needs Work | Solid | Excellent |
+|---|---|---|---|
+| Clarity | Hard to read/interpret | Readable with minor effort | Immediately clear |
+| Insight Depth | Surface stats only | At least one non-obvious finding | Multiple meaningful insights |
+| Completeness | Major gaps in coverage | Distributions and relationships covered | Shape, outliers, and missingness are all addressed |
+| Aesthetics | Cluttered or default styling | Clean with proper labels | Polished and consistent |
+
+## Your task
+
+You will receive:
+1. A dataset sample (first rows and column info)
+2. A statistical summary produced by the Visualizer Agent
+3. A list of visualizations, each with a title, description, and the actual chart image
+
+For EACH visualization, you must:
+- Score it on all 4 rubric dimensions (Excellent / Solid / Needs Work)
+- Identify the top 3 issues (or fewer if the visualization is strong)
+
+Then provide aggregate scores across all visualizations for each rubric dimension, with brief reasoning.
+
+## Response format
+
+You MUST respond with valid JSON matching this exact structure (no markdown fencing):
+{
+  "per_visualization": [
+    {
+      "title": "...",
+      "scores": {"Clarity": "...", "Insight Depth": "...", "Completeness": "...", "Aesthetics": "..."},
+      "top_issues": ["issue 1", "issue 2", "issue 3"]
+    }
+  ],
+  "aggregate": {
+    "Clarity": {"score": "...", "reasons": ["reason 1", "..."]},
+    "Insight Depth": {"score": "...", "reasons": ["..."]},
+    "Completeness": {"score": "...", "reasons": ["..."]},
+    "Aesthetics": {"score": "...", "reasons": ["..."]}
+  }
+}
+"""
+
+
+def _build_dataset_context(df):
+    """Build a text description of the dataset for the prompt."""
+    parts = []
+    parts.append(f"Dataset shape: {df.shape[0]} rows × {df.shape[1]} columns")
+    parts.append(f"Columns: {', '.join(df.columns.tolist())}")
+    parts.append(f"Dtypes:\n{df.dtypes.to_string()}")
+    parts.append(f"\nFirst 5 rows:\n{df.head().to_string()}")
+
+    # Missing values
+    missing = df.isnull().sum()
+    missing = missing[missing > 0]
+    if len(missing) > 0:
+        parts.append(f"\nMissing values:\n{missing.to_string()}")
     else:
-        reasons.append("Some visualizations are missing titles or descriptions.")
-        score = "Needs Work"
+        parts.append("\nNo missing values.")
 
-    if "numeric_summary" in summary and "missing_values" in summary:
-        reasons.append("Statistical summary is well-structured with descriptive statistics and missingness reporting.")
+    return "\n".join(parts)
+
+
+def _build_summary_context(summary):
+    """Convert the Visualizer summary dict to a readable string."""
+    parts = []
+    parts.append(f"Shape: {summary.get('shape', 'N/A')}")
+
+    mv = summary.get("missing_values", {})
+    if isinstance(mv, dict):
+        parts.append(f"Missing values: {mv}")
     else:
-        reasons.append("Statistical summary could be more comprehensive.")
-        if score == "Excellent":
-            score = "Solid"
+        parts.append(f"Missing values: {mv}")
 
-    return score, reasons
+    if "numeric_summary" in summary:
+        parts.append(f"Descriptive statistics:\n{summary['numeric_summary'].to_string()}")
 
+    if "correlations" in summary:
+        parts.append(f"Correlation matrix:\n{summary['correlations'].to_string()}")
 
-def _evaluate_insight_depth(summary, visualizations):
-    reasons = []
-    non_obvious_count = 0
-
-    descriptions = " ".join(v[2] for v in visualizations)
-    desc_lower = descriptions.lower()
-
-    # Check for correlation insights
-    if "correlat" in desc_lower:
-        non_obvious_count += 1
-        reasons.append("Explores inter-feature correlations with quantified strength.")
-
-    # Check for group-level patterns
-    if "group" in desc_lower or "colored by" in desc_lower or "split by" in desc_lower:
-        non_obvious_count += 1
-        reasons.append("Reveals group-level patterns through colored/grouped visualizations.")
-
-    # Check for outlier observations
-    if "outlier" in desc_lower:
-        non_obvious_count += 1
-        reasons.append("Identifies and discusses outliers in the data.")
-
-    # Check for group-by analysis in summary
     if "group_means" in summary:
-        non_obvious_count += 1
-        reasons.append(f"Provides per-group statistical breakdowns by {summary.get('group_col', 'category')}.")
+        parts.append(f"Group means by {summary.get('group_col', 'group')}:\n{summary['group_means'].to_string()}")
 
-    # Check for distribution shape observations
-    if "skew" in desc_lower or "spread" in desc_lower or "median" in desc_lower:
-        non_obvious_count += 1
-        reasons.append("Notes distribution shape characteristics (skewness, spread).")
+    if "categorical_counts" in summary:
+        for col, counts in summary["categorical_counts"].items():
+            parts.append(f"{col} value counts: {counts}")
 
-    if non_obvious_count >= 3:
-        score = "Excellent"
-        reasons.insert(0, "Multiple meaningful, non-obvious insights are presented.")
-    elif non_obvious_count >= 1:
-        score = "Solid"
-        reasons.insert(0, "At least one non-obvious finding is highlighted.")
-    else:
-        score = "Needs Work"
-        reasons.insert(0, "Only surface-level statistics are presented.")
-
-    return score, reasons
+    return "\n".join(parts)
 
 
-def _evaluate_completeness(summary, visualizations):
-    reasons = []
-    checks_passed = 0
+def _build_messages(df, summary, visualizations):
+    """Build the ChatGPT messages array with text and images."""
+    dataset_context = _build_dataset_context(df)
+    summary_context = _build_summary_context(summary)
 
-    viz_titles = " ".join(v[0].lower() for v in visualizations)
-    viz_descs = " ".join(v[2].lower() for v in visualizations)
-    all_text = viz_titles + " " + viz_descs
+    # Build the user message with text + images
+    user_content = []
 
-    if "distribut" in all_text or "histogram" in all_text:
-        checks_passed += 1
-        reasons.append("Feature distributions are visualized.")
+    user_content.append({
+        "type": "text",
+        "text": (
+            f"## Dataset\n{dataset_context}\n\n"
+            f"## Statistical Summary from Visualizer Agent\n{summary_context}\n\n"
+            f"## Visualizations\n"
+            f"There are {len(visualizations)} visualizations to evaluate. "
+            f"Each is shown below with its title and the Visualizer Agent's description.\n"
+        ),
+    })
 
-    if "scatter" in all_text or "correlat" in all_text or "vs" in all_text:
-        checks_passed += 1
-        reasons.append("Feature relationships are explored.")
+    for i, (title, img_b64, description) in enumerate(visualizations, 1):
+        user_content.append({
+            "type": "text",
+            "text": f"\n### Visualization {i}: {title}\nDescription: {description}\n",
+        })
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{img_b64}", "detail": "high"},
+        })
 
-    if "outlier" in all_text or "box" in all_text:
-        checks_passed += 1
-        reasons.append("Outlier detection is addressed (via box plots).")
+    user_content.append({
+        "type": "text",
+        "text": (
+            "\nNow evaluate each visualization against the rubric. "
+            "Score each on all 4 dimensions, list the top 3 issues for each, "
+            "and provide aggregate scores. Respond with JSON only."
+        ),
+    })
 
-    if "missing" in str(summary).lower():
-        checks_passed += 1
-        reasons.append("Missing data is reported in the statistical summary.")
-
-    if "shape" in str(summary).lower() or len(visualizations) >= 3:
-        checks_passed += 1
-        reasons.append(f"Dataset shape is reported and {len(visualizations)} visualizations provide broad coverage.")
-
-    if checks_passed >= 5:
-        score = "Excellent"
-    elif checks_passed >= 3:
-        score = "Solid"
-    else:
-        score = "Needs Work"
-        reasons.insert(0, "Significant gaps in EDA coverage.")
-
-    return score, reasons
-
-
-def _evaluate_aesthetics(summary, visualizations):
-    reasons = []
-
-    num_viz = len(visualizations)
-    all_have_labels = all(v[0] for v in visualizations)
-
-    if num_viz >= 4 and all_have_labels:
-        reasons.append("Consistent styling across all visualizations with proper labels and titles.")
-        reasons.append("Uses a colorblind-friendly palette.")
-        reasons.append("Figures are well-sized with tight layouts.")
-        score = "Excellent"
-    elif all_have_labels:
-        reasons.append("Visualizations have labels and titles.")
-        score = "Solid"
-    else:
-        reasons.append("Some visualizations lack proper labels.")
-        score = "Needs Work"
-
-    return score, reasons
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
 
 
-def run(summary, visualizations):
-    """Evaluate the Visualizer output. Returns dict of {dimension: (score, reasons)}."""
-    evaluations = {}
-    evaluations["Clarity"] = _evaluate_clarity(summary, visualizations)
-    evaluations["Insight Depth"] = _evaluate_insight_depth(summary, visualizations)
-    evaluations["Completeness"] = _evaluate_completeness(summary, visualizations)
-    evaluations["Aesthetics"] = _evaluate_aesthetics(summary, visualizations)
-    return evaluations
+def _parse_response(response_text, visualizations):
+    """Parse the ChatGPT JSON response into the expected return format."""
+    # Strip markdown fencing if present
+    text = response_text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+
+    data = json.loads(text)
+
+    # Build per_viz_evaluations: list of (title, scores_dict, top_3_issues)
+    per_viz_evaluations = []
+    for item in data["per_visualization"]:
+        scores = {}
+        for dim in RUBRIC:
+            raw = item["scores"].get(dim, "Solid")
+            scores[dim] = raw if raw in ("Excellent", "Solid", "Needs Work") else "Solid"
+        issues = item.get("top_issues", [])[:3]
+        per_viz_evaluations.append((item["title"], scores, issues))
+
+    # Build overall_evaluations: dict of {dimension: (score, reasons)}
+    overall_evaluations = {}
+    for dim in RUBRIC:
+        agg = data["aggregate"].get(dim, {})
+        raw_score = agg.get("score", "Solid")
+        score = raw_score if raw_score in ("Excellent", "Solid", "Needs Work") else "Solid"
+        reasons = agg.get("reasons", [])
+        overall_evaluations[dim] = (score, reasons)
+
+    return overall_evaluations, per_viz_evaluations
+
+
+def run(df, summary, visualizations, api_key):
+    """Evaluate the Visualizer output using ChatGPT.
+
+    Args:
+        df: the source DataFrame
+        summary: statistical summary dict from the Visualizer
+        visualizations: list of (title, base64_png, description)
+        api_key: OpenAI API key
+
+    Returns:
+        overall_evaluations: dict of {dimension: (score, reasons)}
+        per_viz_evaluations: list of (title, scores_dict, top_3_issues)
+    """
+    client = OpenAI(api_key=api_key)
+
+    messages = _build_messages(df, summary, visualizations)
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=messages,
+        max_tokens=4096,
+        temperature=0.3,
+    )
+
+    response_text = response.choices[0].message.content
+    return _parse_response(response_text, visualizations)
