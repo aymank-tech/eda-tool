@@ -28,7 +28,6 @@ def _evaluate_clarity(summary, visualizations):
     score = "Solid"
     reasons = []
 
-    # Check if visualizations have titles and descriptions
     all_have_titles = all(v[0] for v in visualizations)
     all_have_descriptions = all(v[2] for v in visualizations)
 
@@ -42,7 +41,6 @@ def _evaluate_clarity(summary, visualizations):
         reasons.append("Some visualizations are missing titles or descriptions.")
         score = "Needs Work"
 
-    # Check if statistical summary is structured
     if "numeric_summary" in summary and "missing_values" in summary:
         reasons.append("Statistical summary is well-structured with descriptive statistics and missingness reporting.")
     else:
@@ -54,30 +52,36 @@ def _evaluate_clarity(summary, visualizations):
 
 
 def _evaluate_insight_depth(summary, visualizations):
-    score = "Solid"
     reasons = []
     non_obvious_count = 0
 
-    # Check for Simpson's paradox mention
     descriptions = " ".join(v[2] for v in visualizations)
-    if "simpson" in descriptions.lower() or "paradox" in descriptions.lower():
-        non_obvious_count += 1
-        reasons.append("Identifies Simpson's paradox in bill dimensions — a non-obvious finding.")
-
-    # Check for sexual dimorphism
-    if "dimorphism" in descriptions.lower() or ("male" in descriptions.lower() and "female" in descriptions.lower()):
-        non_obvious_count += 1
-        reasons.append("Notes sexual dimorphism patterns across species.")
+    desc_lower = descriptions.lower()
 
     # Check for correlation insights
-    if "correlat" in descriptions.lower():
+    if "correlat" in desc_lower:
         non_obvious_count += 1
-        reasons.append("Explores inter-feature correlations.")
+        reasons.append("Explores inter-feature correlations with quantified strength.")
 
-    # Check for per-species analysis
-    if "species_means" in summary:
+    # Check for group-level patterns
+    if "group" in desc_lower or "colored by" in desc_lower or "split by" in desc_lower:
         non_obvious_count += 1
-        reasons.append("Provides per-species statistical breakdowns.")
+        reasons.append("Reveals group-level patterns through colored/grouped visualizations.")
+
+    # Check for outlier observations
+    if "outlier" in desc_lower:
+        non_obvious_count += 1
+        reasons.append("Identifies and discusses outliers in the data.")
+
+    # Check for group-by analysis in summary
+    if "group_means" in summary:
+        non_obvious_count += 1
+        reasons.append(f"Provides per-group statistical breakdowns by {summary.get('group_col', 'category')}.")
+
+    # Check for distribution shape observations
+    if "skew" in desc_lower or "spread" in desc_lower or "median" in desc_lower:
+        non_obvious_count += 1
+        reasons.append("Notes distribution shape characteristics (skewness, spread).")
 
     if non_obvious_count >= 3:
         score = "Excellent"
@@ -93,11 +97,9 @@ def _evaluate_insight_depth(summary, visualizations):
 
 
 def _evaluate_completeness(summary, visualizations):
-    score = "Solid"
     reasons = []
     checks_passed = 0
 
-    # Check distributions
     viz_titles = " ".join(v[0].lower() for v in visualizations)
     viz_descs = " ".join(v[2].lower() for v in visualizations)
     all_text = viz_titles + " " + viz_descs
@@ -106,22 +108,18 @@ def _evaluate_completeness(summary, visualizations):
         checks_passed += 1
         reasons.append("Feature distributions are visualized.")
 
-    # Check relationships
     if "scatter" in all_text or "correlat" in all_text or "vs" in all_text:
         checks_passed += 1
         reasons.append("Feature relationships are explored.")
 
-    # Check outliers
     if "outlier" in all_text or "box" in all_text:
         checks_passed += 1
         reasons.append("Outlier detection is addressed (via box plots).")
 
-    # Check missingness
     if "missing" in str(summary).lower():
         checks_passed += 1
         reasons.append("Missing data is reported in the statistical summary.")
 
-    # Check shape
     if "shape" in str(summary).lower() or len(visualizations) >= 3:
         checks_passed += 1
         reasons.append(f"Dataset shape is reported and {len(visualizations)} visualizations provide broad coverage.")
@@ -138,7 +136,6 @@ def _evaluate_completeness(summary, visualizations):
 
 
 def _evaluate_aesthetics(summary, visualizations):
-    score = "Solid"
     reasons = []
 
     num_viz = len(visualizations)

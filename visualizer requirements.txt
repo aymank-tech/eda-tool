@@ -27,5 +27,12 @@ The tool should have a button to run the Visualizer and display its results, and
 
 The tool should run on a local browser. 
 
+---------------------------------------------------------
+
+Let's do the following changes:
+- I want to generalize EDA tool so that we can apply it to any dataset. Allow me to choose from the available datasets
+- We have two datasets available right now, the Palmer Penguins dataset and the titanic dataset in the datasets folder. 
+
+
 
 
