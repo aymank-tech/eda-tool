@@ -1,7 +1,8 @@
-"""Critic Agent — uses ChatGPT to evaluate the Visualizer Agent's EDA output against a rubric."""
+"""Scorer Agent — uses GPT-5.4 or Claude Opus to evaluate visualizations against a rubric."""
 
 import json
 from openai import OpenAI
+import anthropic
 
 RUBRIC = {
     "Clarity": {
@@ -84,7 +85,6 @@ def _build_dataset_context(df):
     parts.append(f"Dtypes:\n{df.dtypes.to_string()}")
     parts.append(f"\nFirst 5 rows:\n{df.head().to_string()}")
 
-    # Missing values
     missing = df.isnull().sum()
     missing = missing[missing > 0]
     if len(missing) > 0:
@@ -101,10 +101,7 @@ def _build_summary_context(summary):
     parts.append(f"Shape: {summary.get('shape', 'N/A')}")
 
     mv = summary.get("missing_values", {})
-    if isinstance(mv, dict):
-        parts.append(f"Missing values: {mv}")
-    else:
-        parts.append(f"Missing values: {mv}")
+    parts.append(f"Missing values: {mv}")
 
     if "numeric_summary" in summary:
         parts.append(f"Descriptive statistics:\n{summary['numeric_summary'].to_string()}")
@@ -127,7 +124,6 @@ def _build_messages(df, summary, visualizations):
     dataset_context = _build_dataset_context(df)
     summary_context = _build_summary_context(summary)
 
-    # Build the user message with text + images
     user_content = []
 
     user_content.append({
@@ -166,9 +162,8 @@ def _build_messages(df, summary, visualizations):
     ]
 
 
-def _parse_response(response_text, visualizations):
+def _parse_response(response_text):
     """Parse the ChatGPT JSON response into the expected return format."""
-    # Strip markdown fencing if present
     text = response_text.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1] if "\n" in text else text[3:]
@@ -178,7 +173,6 @@ def _parse_response(response_text, visualizations):
 
     data = json.loads(text)
 
-    # Build per_viz_evaluations: list of (title, scores_dict, top_3_issues)
     per_viz_evaluations = []
     for item in data["per_visualization"]:
         scores = {}
@@ -188,7 +182,6 @@ def _parse_response(response_text, visualizations):
         issues = item.get("top_issues", [])[:3]
         per_viz_evaluations.append((item["title"], scores, issues))
 
-    # Build overall_evaluations: dict of {dimension: (score, reasons)}
     overall_evaluations = {}
     for dim in RUBRIC:
         agg = data["aggregate"].get(dim, {})
@@ -200,21 +193,9 @@ def _parse_response(response_text, visualizations):
     return overall_evaluations, per_viz_evaluations
 
 
-def run(df, summary, visualizations, api_key):
-    """Evaluate the Visualizer output using ChatGPT.
-
-    Args:
-        df: the source DataFrame
-        summary: statistical summary dict from the Visualizer
-        visualizations: list of (title, base64_png, description)
-        api_key: OpenAI API key
-
-    Returns:
-        overall_evaluations: dict of {dimension: (score, reasons)}
-        per_viz_evaluations: list of (title, scores_dict, top_3_issues)
-    """
+def _run_openai(df, summary, visualizations, api_key):
+    """Score using OpenAI GPT-5.4."""
     client = OpenAI(api_key=api_key)
-
     messages = _build_messages(df, summary, visualizations)
 
     response = client.chat.completions.create(
@@ -224,5 +205,83 @@ def run(df, summary, visualizations, api_key):
         temperature=0.3,
     )
 
-    response_text = response.choices[0].message.content
-    return _parse_response(response_text, visualizations)
+    return _parse_response(response.choices[0].message.content)
+
+
+def _build_claude_messages(df, summary, visualizations):
+    """Build Claude-compatible messages with text and images."""
+    dataset_context = _build_dataset_context(df)
+    summary_context = _build_summary_context(summary)
+
+    content = []
+
+    content.append({
+        "type": "text",
+        "text": (
+            f"## Dataset\n{dataset_context}\n\n"
+            f"## Statistical Summary from Visualizer Agent\n{summary_context}\n\n"
+            f"## Visualizations\n"
+            f"There are {len(visualizations)} visualizations to evaluate. "
+            f"Each is shown below with its title and the Visualizer Agent's description.\n"
+        ),
+    })
+
+    for i, (title, img_b64, description) in enumerate(visualizations, 1):
+        content.append({
+            "type": "text",
+            "text": f"\n### Visualization {i}: {title}\nDescription: {description}\n",
+        })
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": img_b64},
+        })
+
+    content.append({
+        "type": "text",
+        "text": (
+            "\nNow evaluate each visualization against the rubric. "
+            "Score each on all 4 dimensions, list the top 3 issues for each, "
+            "and provide aggregate scores. Respond with JSON only."
+        ),
+    })
+
+    return content
+
+
+def _run_claude(df, summary, visualizations, api_key):
+    """Score using Claude Sonnet 4."""
+    import time
+    client = anthropic.Anthropic(api_key=api_key)
+    content = _build_claude_messages(df, summary, visualizations)
+
+    for attempt in range(3):
+        try:
+            response = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=4096,
+                temperature=0.3,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": content}],
+            )
+            return _parse_response(response.content[0].text)
+        except anthropic.InternalServerError:
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+            else:
+                raise
+
+
+def run(df, summary, visualizations, api_key, model="openai"):
+    """Score the Visualizer output.
+
+    Args:
+        model: "openai" for GPT-5.4, "claude" for Claude Opus
+
+    Returns:
+        overall_evaluations: dict of {dimension: (score, reasons)}
+        per_viz_evaluations: list of (title, scores_dict, top_3_issues)
+    """
+    if model == "claude":
+        return _run_claude(df, summary, visualizations, api_key)
+    else:
+        return _run_openai(df, summary, visualizations, api_key)

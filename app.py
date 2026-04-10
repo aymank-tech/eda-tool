@@ -1,4 +1,4 @@
-"""EDA Tool — Visualizer & Critic Agents for any tabular dataset."""
+"""EDA Tool — Reflection-based EDA with Visualizer, Scorer, and Orchestrator agents."""
 
 import streamlit as st
 import pandas as pd
@@ -9,12 +9,13 @@ from palmerpenguins import load_penguins
 
 DATASETS_DIR = os.path.join(os.path.dirname(__file__), "datasets")
 
+SCORE_COLORS = {"Excellent": "🟢", "Solid": "🟡", "Needs Work": "🔴"}
+
 
 def get_available_datasets():
     """Return a dict of {display_name: loader_function}."""
     datasets = {"Palmer Penguins": _load_penguins}
 
-    # Titanic
     titanic_csv = os.path.join(DATASETS_DIR, "titanic", "titanic.csv")
     if os.path.exists(titanic_csv):
         datasets["Titanic"] = lambda path=titanic_csv: pd.read_csv(path)
@@ -26,292 +27,188 @@ def _load_penguins():
     return load_penguins()
 
 
+def _load_env_key(name):
+    """Load a key from Streamlit secrets or .env file."""
+    try:
+        return st.secrets[name]
+    except (KeyError, FileNotFoundError):
+        env_path = os.path.join(os.path.dirname(__file__), ".env")
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    if line.strip().startswith(f"{name}="):
+                        return line.strip().split("=", 1)[1].strip()
+    return ""
+
+
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="EDA Tool", layout="wide")
 st.title("Exploratory Data Analysis Tool")
 st.markdown(
-    "Choose a dataset, run the **Visualizer Agent** to perform EDA, "
-    "the **Critic Agent** to evaluate the results, "
-    "then the **Refiner Agent** to improve the visualizations based on feedback."
+    "Choose a dataset and run the analysis. The tool uses a **reflection loop**: "
+    "the Visualizer generates charts, the Scorer evaluates them against a rubric, "
+    "and the Orchestrator decides whether to refine and retry."
 )
 
-# ── Load API key from Streamlit secrets or .env ─────────────────────────────
-openai_api_key = ""
-try:
-    openai_api_key = st.secrets["OPENAI_API_KEY"]
-except (KeyError, FileNotFoundError):
-    env_path = os.path.join(os.path.dirname(__file__), ".env")
-    if os.path.exists(env_path):
-        with open(env_path) as f:
-            for line in f:
-                if line.strip().startswith("OPENAI_API_KEY="):
-                    openai_api_key = line.strip().split("=", 1)[1].strip()
-                    break
+# ── Load API keys ───────────────────────────────────────────────────────────
+openai_api_key = _load_env_key("OPENAI_API_KEY")
+anthropic_api_key = _load_env_key("ANTHROPIC_API_KEY")
+
+# ── Sidebar ─────────────────────────────────────────────────────────────────
+MODEL_OPTIONS = {"GPT-5.4": "openai", "Claude Sonnet 4": "claude"}
+
+with st.sidebar:
+    st.header("Settings")
+    max_iterations = st.slider("Max iterations", min_value=3, max_value=10, value=5)
+    visualizer_model_label = st.selectbox("Visualizer model", list(MODEL_OPTIONS.keys()), index=0)
+    scorer_model_label = st.selectbox("Scorer model", list(MODEL_OPTIONS.keys()), index=1)
+    visualizer_model = MODEL_OPTIONS[visualizer_model_label]
+    scorer_model = MODEL_OPTIONS[scorer_model_label]
 
 # ── Dataset selector ─────────────────────────────────────────────────────────
 datasets = get_available_datasets()
 dataset_name = st.selectbox("Select a dataset", list(datasets.keys()))
 
-# Reset results when dataset changes
+# Reset when dataset changes
 if st.session_state.get("current_dataset") != dataset_name:
     st.session_state["current_dataset"] = dataset_name
-    st.session_state.pop("summary", None)
-    st.session_state.pop("visualizations", None)
-    st.session_state.pop("evaluations", None)
-    st.session_state.pop("per_viz_evaluations", None)
-    st.session_state.pop("refined_summary", None)
-    st.session_state.pop("refined_visualizations", None)
-    st.session_state.pop("refiner_changes", None)
-    st.session_state.pop("refined_evaluations", None)
-    st.session_state.pop("refined_per_viz_evaluations", None)
+    st.session_state.pop("result", None)
 
-# ── Buttons ──────────────────────────────────────────────────────────────────
-col1, col2, col3 = st.columns(3)
-run_visualizer = col1.button("Run Visualizer Agent", type="primary", use_container_width=True)
-run_critic = col2.button("Run Critic Agent", use_container_width=True)
-run_refiner = col3.button("Run Refiner Agent", use_container_width=True)
+# ── Run button ──────────────────────────────────────────────────────────────
+run_analysis = st.button("Run EDA Analysis", type="primary", use_container_width=True)
 
-# ── Visualizer ───────────────────────────────────────────────────────────────
-if run_visualizer:
-    with st.spinner("Visualizer Agent is analyzing the dataset..."):
-        import visualizer_agent
-
-        df = datasets[dataset_name]()
-        summary, visualizations = visualizer_agent.run(df)
-        st.session_state["summary"] = summary
-        st.session_state["visualizations"] = visualizations
-        st.session_state.pop("evaluations", None)
-        st.session_state.pop("per_viz_evaluations", None)
-        st.session_state.pop("refined_summary", None)
-        st.session_state.pop("refined_visualizations", None)
-        st.session_state.pop("refiner_changes", None)
-    st.session_state.pop("refined_evaluations", None)
-    st.session_state.pop("refined_per_viz_evaluations", None)
-
-if "summary" in st.session_state:
-    summary = st.session_state["summary"]
-    visualizations = st.session_state["visualizations"]
-
-    st.header("Visualizer Agent Results")
-
-    # ── Statistical Summary ──────────────────────────────────────────────────
-    st.subheader("Statistical Summary")
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.markdown(f"**Dataset shape:** {summary['shape']}")
-        st.markdown("**Missing values:**")
-        if isinstance(summary["missing_values"], dict):
-            st.dataframe(
-                pd.DataFrame.from_dict(summary["missing_values"], orient="index", columns=["Count"]),
-                use_container_width=True,
-            )
-        else:
-            st.write(summary["missing_values"])
-
-    with col_b:
-        # Show categorical value counts
-        if summary.get("categorical_counts"):
-            for col_name, counts in list(summary["categorical_counts"].items())[:2]:
-                st.markdown(f"**{col_name} counts:**")
-                st.dataframe(
-                    pd.DataFrame.from_dict(counts, orient="index", columns=["Count"]),
-                    use_container_width=True,
-                )
-
-    if "group_means" in summary:
-        st.markdown(f"**Mean values by {summary['group_col']}:**")
-        st.dataframe(summary["group_means"], use_container_width=True)
-
-    if "numeric_summary" in summary:
-        st.markdown("**Descriptive statistics:**")
-        st.dataframe(summary["numeric_summary"], use_container_width=True)
-
-    if "correlations" in summary:
-        st.markdown("**Correlation matrix:**")
-        st.dataframe(summary["correlations"], use_container_width=True)
-
-    # ── Visualizations ───────────────────────────────────────────────────────
-    st.subheader("Visualizations")
-    for title, img_b64, description in visualizations:
-        st.markdown(f"#### {title}")
-        st.image(base64.b64decode(img_b64), use_container_width=True)
-        st.info(description)
-
-# ── Critic ───────────────────────────────────────────────────────────────────
-if run_critic:
-    if "summary" not in st.session_state:
-        st.warning("Run the Visualizer Agent first so the Critic has something to evaluate.")
-    elif not openai_api_key:
-        st.warning("OpenAI API key not found. Please add OPENAI_API_KEY=... to your .env file.")
+if run_analysis:
+    if not openai_api_key or not anthropic_api_key:
+        missing = []
+        if not openai_api_key:
+            missing.append("OPENAI_API_KEY")
+        if not anthropic_api_key:
+            missing.append("ANTHROPIC_API_KEY")
+        st.warning(f"Missing API key(s): {', '.join(missing)}. Please add them to your .env file.")
     else:
-        with st.spinner("Critic Agent is consulting ChatGPT (GPT-5.4)..."):
-            import critic_agent
-
-            df = datasets[dataset_name]()
-            overall_evaluations, per_viz_evaluations = critic_agent.run(
-                df,
-                st.session_state["summary"],
-                st.session_state["visualizations"],
-                openai_api_key,
-            )
-            st.session_state["evaluations"] = overall_evaluations
-            st.session_state["per_viz_evaluations"] = per_viz_evaluations
-            st.session_state.pop("refined_summary", None)
-            st.session_state.pop("refined_visualizations", None)
-            st.session_state.pop("refiner_changes", None)
-    st.session_state.pop("refined_evaluations", None)
-    st.session_state.pop("refined_per_viz_evaluations", None)
-
-if "evaluations" in st.session_state:
-    st.header("Critic Agent Evaluation")
-
-    SCORE_COLORS = {
-        "Excellent": "🟢",
-        "Solid": "🟡",
-        "Needs Work": "🔴",
-    }
-
-    # ── Per-Visualization Feedback ──────────────────────────────────────────
-    st.subheader("Per-Visualization Scores & Top Issues")
-
-    from critic_agent import RUBRIC
-
-    for title, scores, top_issues in st.session_state["per_viz_evaluations"]:
-        st.markdown(f"#### {title}")
-
-        # Show rubric scores for this visualization
-        score_cols = st.columns(len(RUBRIC))
-        for col, dimension in zip(score_cols, RUBRIC):
-            dim_score = scores[dimension]
-            icon = SCORE_COLORS.get(dim_score, "⚪")
-            col.metric(label=dimension, value=f"{icon} {dim_score}")
-
-        # Show top 3 issues
-        if top_issues:
-            st.markdown("**Top issues:**")
-            for issue in top_issues:
-                st.markdown(f"- {issue}")
-        else:
-            st.success("No issues found — this visualization scores well across all dimensions.")
-
-    st.divider()
-
-    # ── Aggregate Rubric Scores ─────────────────────────────────────────────
-    st.subheader("Aggregate Rubric Scores")
-
-    for dimension, (score, reasons) in st.session_state["evaluations"].items():
-        icon = SCORE_COLORS.get(score, "⚪")
-        st.markdown(f"### {icon} {dimension} — **{score}**")
-        for reason in reasons:
-            st.markdown(f"- {reason}")
-
-    scores = [s for s, _ in st.session_state["evaluations"].values()]
-    score_map = {"Excellent": 3, "Solid": 2, "Needs Work": 1}
-    avg = sum(score_map[s] for s in scores) / len(scores)
-    if avg >= 2.75:
-        overall = "Excellent"
-    elif avg >= 1.75:
-        overall = "Solid"
-    else:
-        overall = "Needs Work"
-
-    st.divider()
-    icon = SCORE_COLORS[overall]
-    st.markdown(f"## {icon} Overall Rating: **{overall}**")
-
-# ── Refiner ─────────────────────────────────────────────────────────────────
-if run_refiner:
-    if "evaluations" not in st.session_state:
-        st.warning("Run the Critic Agent first so the Refiner has feedback to act on.")
-    elif not openai_api_key:
-        st.warning("OpenAI API key not found. Please add OPENAI_API_KEY=... to your .env file.")
-    else:
-        import visualizer_agent
-        import critic_agent
+        from graph import run as run_graph
 
         df = datasets[dataset_name]()
 
-        with st.spinner("Visualizer Agent is refining the visualizations..."):
-            refined_summary, refined_visualizations, changes_made = visualizer_agent.refine(
-                df,
-                st.session_state["summary"],
-                st.session_state["visualizations"],
-                st.session_state["evaluations"],
-                st.session_state["per_viz_evaluations"],
+        # Track progress
+        last_try = [0]
+        last_scored = [0]
+
+        with st.status("Running EDA analysis loop...", expanded=True) as status:
+
+            def on_progress(state):
+                current_try = state.get("try_count", 0)
+                iterations = state.get("iteration_results", [])
+                viz_model = state.get("last_viz_model", "")
+
+                if current_try > last_try[0]:
+                    if current_try == 1:
+                        status.write(f"🎨 **Iteration {current_try}:** Generating initial visualizations (Programmatic)...")
+                    else:
+                        status.write(f"🔄 **Iteration {current_try}:** Generating visualizations with **{visualizer_model_label}**...")
+                    last_try[0] = current_try
+
+                if len(iterations) > last_scored[0]:
+                    latest = iterations[-1]
+                    rating = latest["overall_rating"]
+                    icon = SCORE_COLORS.get(rating, "⚪")
+                    status.write(f"📊 **Iteration {latest['try']}:** Scored by **{scorer_model_label}** — {icon} **{rating}**")
+
+                    if rating == "Excellent" and current_try >= 3:
+                        status.write("✅ Excellent score achieved!")
+                    last_scored[0] = len(iterations)
+
+            result = run_graph(
+                df, openai_api_key, anthropic_api_key,
+                max_tries=max_iterations,
+                visualizer_model=visualizer_model,
+                scorer_model=scorer_model,
+                on_progress=on_progress,
             )
-            st.session_state["refined_summary"] = refined_summary
-            st.session_state["refined_visualizations"] = refined_visualizations
-            st.session_state["refiner_changes"] = changes_made
 
-        with st.spinner("Critic Agent is re-evaluating the refined visualizations (GPT-5.4)..."):
-            refined_overall, refined_per_viz = critic_agent.run(
-                df,
-                refined_summary,
-                refined_visualizations,
-                openai_api_key,
-            )
-            st.session_state["refined_evaluations"] = refined_overall
-            st.session_state["refined_per_viz_evaluations"] = refined_per_viz
+            # Final status
+            final_rating = result["overall_rating"]
+            n_iterations = len(result["iteration_results"])
+            stagnated = result.get("stagnated", False)
 
-if "refined_visualizations" in st.session_state:
-    st.header("Refiner Agent Results")
+            if final_rating == "Excellent":
+                status.update(label=f"✅ Analysis complete — Excellent in {n_iterations} iteration(s)", state="complete")
+            elif stagnated:
+                status.update(label=f"⚠️ Analysis stopped — score plateaued at {final_rating} after {n_iterations} iterations", state="complete")
+            else:
+                status.update(label=f"⏹️ Analysis complete — {final_rating} after {n_iterations} iteration(s) (max reached)", state="complete")
 
-    # Show what was improved
-    st.subheader("Improvements Made")
-    for change in st.session_state["refiner_changes"]:
-        st.markdown(f"- {change}")
+        st.session_state["result"] = result
 
-    # Show refined visualizations
-    st.subheader("Refined Visualizations")
-    for title, img_b64, description in st.session_state["refined_visualizations"]:
-        st.markdown(f"#### {title}")
-        st.image(base64.b64decode(img_b64), use_container_width=True)
-        st.info(description)
+# ── Display results ─────────────────────────────────────────────────────────
+if "result" in st.session_state:
+    result = st.session_state["result"]
+    iterations = result["iteration_results"]
 
-if "refined_evaluations" in st.session_state:
-    st.header("Critic Re-Evaluation (After Refinement)")
+    from scorer_agent import RUBRIC
 
-    SCORE_COLORS_R = {"Excellent": "🟢", "Solid": "🟡", "Needs Work": "🔴"}
+    for i, it in enumerate(iterations):
+        is_last = (i == len(iterations) - 1)
+        rating = it["overall_rating"]
+        icon = SCORE_COLORS.get(rating, "⚪")
+        label = f"Iteration {it['try']} — {icon} {rating}"
+        if is_last:
+            label += " (final)"
 
-    from critic_agent import RUBRIC as RUBRIC_R
+        with st.expander(label, expanded=is_last):
+            # ── Model info ─────────────────────────────────────────────
+            viz_model = it.get("visualizer_model", "Programmatic")
+            scorer_model = it.get("scorer_model", "?")
+            mc1, mc2 = st.columns(2)
+            mc1.info(f"**Visualizer:** {viz_model}")
+            mc2.info(f"**Scorer:** {scorer_model}")
 
-    # Per-visualization scores
-    st.subheader("Per-Visualization Scores & Top Issues")
-    for title, scores, top_issues in st.session_state["refined_per_viz_evaluations"]:
-        st.markdown(f"#### {title}")
-        score_cols = st.columns(len(RUBRIC_R))
-        for col, dimension in zip(score_cols, RUBRIC_R):
-            dim_score = scores[dimension]
-            icon = SCORE_COLORS_R.get(dim_score, "⚪")
-            col.metric(label=dimension, value=f"{icon} {dim_score}")
-        if top_issues:
-            st.markdown("**Top issues:**")
-            for issue in top_issues:
-                st.markdown(f"- {issue}")
-        else:
-            st.success("No issues found — this visualization scores well across all dimensions.")
+            # ── Visualizations ──────────────────────────────────────────
+            st.subheader("Visualizations")
+            for title, img_b64, description in it["visualizations"]:
+                st.markdown(f"#### {title}")
+                st.image(base64.b64decode(img_b64), use_container_width=True)
+                st.info(description)
 
+            # ── Per-visualization scores ────────────────────────────────
+            st.subheader("Per-Visualization Scores & Top Issues")
+            for title, scores, top_issues in it["per_viz_evaluations"]:
+                st.markdown(f"#### {title}")
+                score_cols = st.columns(len(RUBRIC))
+                for col, dimension in zip(score_cols, RUBRIC):
+                    dim_score = scores[dimension]
+                    dim_icon = SCORE_COLORS.get(dim_score, "⚪")
+                    col.metric(label=dimension, value=f"{dim_icon} {dim_score}")
+                if top_issues:
+                    st.markdown("**Top issues:**")
+                    for issue in top_issues:
+                        st.markdown(f"- {issue}")
+                else:
+                    st.success("No issues found.")
+
+            # ── Aggregate scores ────────────────────────────────────────
+            st.subheader("Aggregate Rubric Scores")
+            for dimension, (score, reasons) in it["scores"].items():
+                dim_icon = SCORE_COLORS.get(score, "⚪")
+                st.markdown(f"### {dim_icon} {dimension} — **{score}**")
+                for reason in reasons:
+                    st.markdown(f"- {reason}")
+
+            st.divider()
+            st.markdown(f"## {icon} Overall Rating: **{rating}**")
+
+    # ── Final summary ───────────────────────────────────────────────────
     st.divider()
+    final = iterations[-1]
+    final_icon = SCORE_COLORS.get(final["overall_rating"], "⚪")
+    n = len(iterations)
 
-    # Aggregate scores
-    st.subheader("Aggregate Rubric Scores")
-    for dimension, (score, reasons) in st.session_state["refined_evaluations"].items():
-        icon = SCORE_COLORS_R.get(score, "⚪")
-        st.markdown(f"### {icon} {dimension} — **{score}**")
-        for reason in reasons:
-            st.markdown(f"- {reason}")
-
-    r_scores = [s for s, _ in st.session_state["refined_evaluations"].values()]
-    r_score_map = {"Excellent": 3, "Solid": 2, "Needs Work": 1}
-    r_avg = sum(r_score_map[s] for s in r_scores) / len(r_scores)
-    if r_avg >= 2.75:
-        r_overall = "Excellent"
-    elif r_avg >= 1.75:
-        r_overall = "Solid"
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Final Rating", f"{final_icon} {final['overall_rating']}")
+    col2.metric("Iterations", n)
+    if result.get("stagnated"):
+        col3.metric("Status", "Plateaued")
+    elif final["overall_rating"] == "Excellent":
+        col3.metric("Status", "Target reached")
     else:
-        r_overall = "Needs Work"
-
-    st.divider()
-    icon = SCORE_COLORS_R[r_overall]
-    st.markdown(f"## {icon} Overall Rating (Refined): **{r_overall}**")
+        col3.metric("Status", "Max iterations")

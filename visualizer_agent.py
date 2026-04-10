@@ -811,3 +811,197 @@ def _refine_boxplot(df, numeric_cols, group_col):
 
     desc = _enhanced_boxplot_insights(df, box_cols, group_col, hue)
     return (f"Box Plots by {group_col} (Refined)", _fig_to_base64(fig), desc)
+
+
+# ── LLM-based refinement ────────────────────────────────────────────────────
+
+_LLM_SYSTEM_PROMPT = """\
+You are an expert data visualization coder. You write Python code that creates \
+publication-quality EDA visualizations using matplotlib and seaborn.
+
+Your code will be executed with exec(). The DataFrame is available as `df`. \
+The modules `matplotlib.pyplot as plt`, `seaborn as sns`, `numpy as np`, \
+and `pandas as pd` are pre-imported.
+
+CRITICAL RULES:
+1. Create a list called `results` containing tuples of (title_str, fig_object, description_str)
+2. Each fig must be a matplotlib Figure object created with plt.subplots() or plt.figure()
+3. DO NOT call plt.show()
+4. DO NOT call plt.close()
+5. Write detailed descriptions (2-3 sentences) with specific statistical observations \
+   (mention actual numbers: means, medians, correlations, outlier counts, etc.)
+6. Call sns.set_theme(style="whitegrid", palette="colorblind") at the top
+7. Every chart MUST have: a descriptive title, labeled axes, and a legend where applicable
+8. Create 4-5 diverse visualizations covering: distributions, scatter/relationships, \
+   correlation heatmap, group comparisons (box/violin plots), and missing data or outlier analysis
+9. Use different chart types from the previous iteration (e.g., violin instead of box, \
+   KDE instead of histogram, pair plots, etc.)
+10. Directly address every issue raised by the Scorer
+
+Output ONLY valid Python code. No markdown fencing, no explanations, no comments outside the code."""
+
+
+def _build_llm_user_prompt(df, scores, per_viz_evaluations):
+    """Build the user prompt for LLM-based visualization refinement."""
+    import json
+
+    col_info_lines = []
+    for col in df.columns:
+        dtype = str(df[col].dtype)
+        n_unique = df[col].nunique()
+        n_missing = df[col].isnull().sum()
+        sample_vals = df[col].dropna().head(3).tolist()
+        col_info_lines.append(
+            f"  - {col} (dtype={dtype}, {n_unique} unique, {n_missing} missing, "
+            f"sample={sample_vals})"
+        )
+    col_info_str = "\n".join(col_info_lines)
+
+    feedback_lines = []
+    for title, viz_scores, issues in per_viz_evaluations:
+        score_str = ", ".join(f"{d}: {s}" for d, s in viz_scores.items())
+        issues_str = "; ".join(issues) if issues else "No issues"
+        feedback_lines.append(f"  - \"{title}\" [{score_str}]\n    Issues: {issues_str}")
+    feedback_str = "\n".join(feedback_lines)
+
+    aggregate_str = json.dumps({d: s for d, (s, _) in scores.items()}, indent=2)
+    sample_csv = df.head(10).to_csv(index=False)
+
+    return f"""Generate improved EDA visualizations for this dataset. The previous \
+visualizations scored poorly — create SIGNIFICANTLY DIFFERENT charts that address every issue.
+
+## Dataset
+Shape: {df.shape[0]} rows × {df.shape[1]} columns
+Columns:
+{col_info_str}
+
+Sample data (first 10 rows as CSV):
+{sample_csv}
+
+## Previous Scorer Feedback
+Per-visualization:
+{feedback_str}
+
+Aggregate scores:
+{aggregate_str}
+
+## Instructions
+- Create 4-5 visualizations that are substantially different from the previous ones
+- Use chart types like: violin plots, KDE plots, pair plots, swarm plots, heatmaps, \
+  bar charts with error bars, etc.
+- Every description must include actual numbers from the data
+- Directly address each issue listed above
+- Make sure axis labels and legends are clear and complete"""
+
+
+def _call_openai_for_code(user_prompt, api_key):
+    """Call OpenAI GPT-5.4 to generate visualization code."""
+    from openai import OpenAI
+    client = OpenAI(api_key=api_key)
+    response = client.chat.completions.create(
+        model="gpt-5.4",
+        messages=[
+            {"role": "system", "content": _LLM_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_completion_tokens=8192,
+        temperature=0.7,
+    )
+    return response.choices[0].message.content
+
+
+def _call_claude_for_code(user_prompt, api_key):
+    """Call Claude Sonnet 4 to generate visualization code."""
+    import anthropic
+    import time
+    client = anthropic.Anthropic(api_key=api_key)
+    for attempt in range(3):
+        try:
+            response = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=8192,
+                temperature=0.7,
+                system=_LLM_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+            return response.content[0].text
+        except anthropic.InternalServerError:
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+            else:
+                raise
+
+
+def _strip_code_fencing(code):
+    """Remove markdown code fencing if present."""
+    code = code.strip()
+    if code.startswith("```"):
+        first_newline = code.find("\n")
+        code = code[first_newline + 1:] if first_newline != -1 else code[3:]
+        if code.endswith("```"):
+            code = code[:-3]
+        code = code.strip()
+    return code
+
+
+def _execute_viz_code(code, df):
+    """Execute generated code and return list of (title, base64_png, description)."""
+    namespace = {
+        "df": df.copy(),
+        "pd": pd,
+        "np": np,
+        "plt": plt,
+        "sns": sns,
+    }
+
+    exec(code, namespace)
+    raw_results = namespace.get("results", [])
+
+    refined_viz = []
+    for item in raw_results:
+        if len(item) >= 3:
+            title, fig, desc = item[0], item[1], item[2]
+            refined_viz.append((str(title), _fig_to_base64(fig), str(desc)))
+
+    return refined_viz
+
+
+def refine_with_llm(df, summary, visualizations, scores, per_viz_evaluations, api_key, model="openai"):
+    """Use an LLM to generate entirely new visualization code based on Scorer feedback.
+
+    Args:
+        model: "openai" for GPT-5.4, "claude" for Claude Opus
+
+    Falls back to programmatic refine() if code generation or execution fails.
+
+    Returns:
+        refined_summary: dict (passed through unchanged)
+        refined_visualizations: list of (title, base64_png, description)
+        changes_made: list of strings describing what was improved
+    """
+    user_prompt = _build_llm_user_prompt(df, scores, per_viz_evaluations)
+
+    # ── Call LLM ─────────────────────────────────────────────────────────────
+    try:
+        if model == "claude":
+            code = _call_claude_for_code(user_prompt, api_key)
+            model_name = "Claude Opus"
+        else:
+            code = _call_openai_for_code(user_prompt, api_key)
+            model_name = "GPT-5.4"
+    except Exception:
+        return refine(df, summary, visualizations, scores, per_viz_evaluations)
+
+    code = _strip_code_fencing(code)
+
+    # ── Execute the generated code ───────────────────────────────────────────
+    try:
+        refined_viz = _execute_viz_code(code, df)
+    except Exception:
+        return refine(df, summary, visualizations, scores, per_viz_evaluations)
+
+    if not refined_viz:
+        return refine(df, summary, visualizations, scores, per_viz_evaluations)
+
+    changes = [f"Generated entirely new visualizations using {model_name} based on Scorer feedback"]
+    return summary, refined_viz, changes
