@@ -62,6 +62,8 @@ if st.session_state.get("current_dataset") != dataset_name:
     st.session_state.pop("refined_summary", None)
     st.session_state.pop("refined_visualizations", None)
     st.session_state.pop("refiner_changes", None)
+    st.session_state.pop("refined_evaluations", None)
+    st.session_state.pop("refined_per_viz_evaluations", None)
 
 # ── Buttons ──────────────────────────────────────────────────────────────────
 col1, col2, col3 = st.columns(3)
@@ -83,6 +85,8 @@ if run_visualizer:
         st.session_state.pop("refined_summary", None)
         st.session_state.pop("refined_visualizations", None)
         st.session_state.pop("refiner_changes", None)
+    st.session_state.pop("refined_evaluations", None)
+    st.session_state.pop("refined_per_viz_evaluations", None)
 
 if "summary" in st.session_state:
     summary = st.session_state["summary"]
@@ -141,7 +145,7 @@ if run_critic:
     elif not openai_api_key:
         st.warning("OpenAI API key not found. Please add OPENAI_API_KEY=... to your .env file.")
     else:
-        with st.spinner("Critic Agent is consulting ChatGPT (GPT-4o)..."):
+        with st.spinner("Critic Agent is consulting ChatGPT (GPT-5.4)..."):
             import critic_agent
 
             df = datasets[dataset_name]()
@@ -156,6 +160,8 @@ if run_critic:
             st.session_state.pop("refined_summary", None)
             st.session_state.pop("refined_visualizations", None)
             st.session_state.pop("refiner_changes", None)
+    st.session_state.pop("refined_evaluations", None)
+    st.session_state.pop("refined_per_viz_evaluations", None)
 
 if "evaluations" in st.session_state:
     st.header("Critic Agent Evaluation")
@@ -218,12 +224,16 @@ if "evaluations" in st.session_state:
 if run_refiner:
     if "evaluations" not in st.session_state:
         st.warning("Run the Critic Agent first so the Refiner has feedback to act on.")
+    elif not openai_api_key:
+        st.warning("OpenAI API key not found. Please add OPENAI_API_KEY=... to your .env file.")
     else:
-        with st.spinner("Refiner Agent is improving the visualizations..."):
-            import refiner_agent
+        import visualizer_agent
+        import critic_agent
 
-            df = datasets[dataset_name]()
-            refined_summary, refined_visualizations, changes_made = refiner_agent.run(
+        df = datasets[dataset_name]()
+
+        with st.spinner("Visualizer Agent is refining the visualizations..."):
+            refined_summary, refined_visualizations, changes_made = visualizer_agent.refine(
                 df,
                 st.session_state["summary"],
                 st.session_state["visualizations"],
@@ -233,6 +243,16 @@ if run_refiner:
             st.session_state["refined_summary"] = refined_summary
             st.session_state["refined_visualizations"] = refined_visualizations
             st.session_state["refiner_changes"] = changes_made
+
+        with st.spinner("Critic Agent is re-evaluating the refined visualizations (GPT-5.4)..."):
+            refined_overall, refined_per_viz = critic_agent.run(
+                df,
+                refined_summary,
+                refined_visualizations,
+                openai_api_key,
+            )
+            st.session_state["refined_evaluations"] = refined_overall
+            st.session_state["refined_per_viz_evaluations"] = refined_per_viz
 
 if "refined_visualizations" in st.session_state:
     st.header("Refiner Agent Results")
@@ -248,3 +268,50 @@ if "refined_visualizations" in st.session_state:
         st.markdown(f"#### {title}")
         st.image(base64.b64decode(img_b64), use_container_width=True)
         st.info(description)
+
+if "refined_evaluations" in st.session_state:
+    st.header("Critic Re-Evaluation (After Refinement)")
+
+    SCORE_COLORS_R = {"Excellent": "🟢", "Solid": "🟡", "Needs Work": "🔴"}
+
+    from critic_agent import RUBRIC as RUBRIC_R
+
+    # Per-visualization scores
+    st.subheader("Per-Visualization Scores & Top Issues")
+    for title, scores, top_issues in st.session_state["refined_per_viz_evaluations"]:
+        st.markdown(f"#### {title}")
+        score_cols = st.columns(len(RUBRIC_R))
+        for col, dimension in zip(score_cols, RUBRIC_R):
+            dim_score = scores[dimension]
+            icon = SCORE_COLORS_R.get(dim_score, "⚪")
+            col.metric(label=dimension, value=f"{icon} {dim_score}")
+        if top_issues:
+            st.markdown("**Top issues:**")
+            for issue in top_issues:
+                st.markdown(f"- {issue}")
+        else:
+            st.success("No issues found — this visualization scores well across all dimensions.")
+
+    st.divider()
+
+    # Aggregate scores
+    st.subheader("Aggregate Rubric Scores")
+    for dimension, (score, reasons) in st.session_state["refined_evaluations"].items():
+        icon = SCORE_COLORS_R.get(score, "⚪")
+        st.markdown(f"### {icon} {dimension} — **{score}**")
+        for reason in reasons:
+            st.markdown(f"- {reason}")
+
+    r_scores = [s for s, _ in st.session_state["refined_evaluations"].values()]
+    r_score_map = {"Excellent": 3, "Solid": 2, "Needs Work": 1}
+    r_avg = sum(r_score_map[s] for s in r_scores) / len(r_scores)
+    if r_avg >= 2.75:
+        r_overall = "Excellent"
+    elif r_avg >= 1.75:
+        r_overall = "Solid"
+    else:
+        r_overall = "Needs Work"
+
+    st.divider()
+    icon = SCORE_COLORS_R[r_overall]
+    st.markdown(f"## {icon} Overall Rating (Refined): **{r_overall}**")

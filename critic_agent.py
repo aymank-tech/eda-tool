@@ -218,9 +218,9 @@ def run(df, summary, visualizations, api_key):
     messages = _build_messages(df, summary, visualizations)
 
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-5.4",
         messages=messages,
-        max_tokens=4096,
+        max_completion_tokens=4096,
         temperature=0.3,
     )
 
