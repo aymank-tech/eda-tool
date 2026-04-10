@@ -34,5 +34,56 @@ Let's do the following changes:
 - We have two datasets available right now, the Palmer Penguins dataset and the titanic dataset in the datasets folder. 
 
 
+--- 
+
+Let's make the following changes:
+
+Have the Critic Agent describe the top 3 issues with each visualization and score each visualization according the rubric described. 
 
 
+
+-------------------------------
+
+- Add a third agent, call it the Refiner agent. This agent takes the dataset, the output of the Visualizer Agent, and the output of the Critic Agent. The Refiner then refines the outcomes of the Visualizer based on the output from the Critic Agent. 
+- Add a third button, call it "Run Refiner Agent" that invokes the Refiner agent. 
+
+-------
+Let's have the Critic Agent invoke Chatgpt, include all the context needed to provide a useful critique,  
+  including the dataset, and outputs of the Visualizer agent  
+
+---------------------------
+
+The "Run Refiner Agent" button should do the following:
+1- Take the outcome of the Critic agent, pass that to the Visualizer agent, along with the dataset and the original output from the visualizer, and produce a new set of refined visualizations
+2- Then run the Critic agent again on refined visualizations to get updated set of scores
+
+
+------------------------------
+
+Let's make a few changes here. 
+
+The key idea here is we will use a Reflection/self-correction pattern. We will generate insights and graphs from the dataset. Then score these graphs according to the defined rubric, then go and regenerate the graphs again and rescore them, and do this in a loop until the score is Excellent.
+
+The core architecture for this needs to be a "stateful graph", we should use LangGraph, this will allow us to define the loop as a set of nodes and edges where state is preserved. 
+
+The Agent Roles:
+- The Orchestrator (The "Brain"):
+	Role: Manages the state, decides if the loop should continue, and formats the final output.
+	Task: Takes user requirements, coordinates between Visualizer and Scorer, and tracks "Try Count" to prevent infinite loops.
+- The Visualizer (The "Coder"):
+	Role: Writes and executes Python code (using libraries like Plotly, Seaborn, or Altair).
+	Task: Receives the dataset schema and feedback; outputs an image (PNG/SVG) and the code used to generate it.
+- The Scorer (The "Critic"):
+	Role: A Vision-capable LLM (e.g., GPT-4o or Claude 3.5 Sonnet).
+	Task: It doesn't just look at the code; it looks at the actual image. It compares the image against your rubric (e.g., "Is the font readable?", "Are the axes labeled?", "Is the color contrast accessible?") and provides a numeric score and specific critique.
+
+Sometimes the Visualizer might keep making the same mistake, to avoid falling in a loop, the Orchestrator should keep a "Memory" of previous attempts. If the score doesn't improve after 3 iterations, the Orchestrator should change the prompt strategy or stop and ask the user for clarification.
+
+For the scorer agent, lets use Chatgpt model: gpt-5.4
+
+
+-------------
+Make the following changes
+1- Run at least 3 iterations
+2- Every time you invoke the the scorer and visualizer, flip a coin to see if you will use Claude opus or Chatgpt 4.5. 
+3- Show for each iteration, which model was used for visualizing, and which model was used for the critic
